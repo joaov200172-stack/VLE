@@ -41,7 +41,8 @@ function telaLogin(modo = "entrar") {
         } else if (modo === "criar") {
           const { data, error } = await sb.auth.signUp({ email: email.value.trim(), password: senha.value, options: { data: { nome: nome.value.trim() }, emailRedirectTo: redirect } });
           if (error) throw error;
-          if (!data.session) msg.textContent = "Conta criada. Enviamos um link de confirmação para o seu e-mail; depois de confirmar, entre aqui.";
+          if (data.user && !data.user.identities?.length) msg.textContent = "Este e-mail já tem conta. Volte e clique em Entrar; se não lembrar a senha, use \"Esqueci a senha\".";
+          else if (!data.session) msg.textContent = "Conta criada. Enviamos um link de confirmação para o seu e-mail (veja também o spam); depois de confirmar, entre aqui.";
         } else {
           const { error } = await sb.auth.resetPasswordForEmail(email.value.trim(), { redirectTo: redirect });
           if (error) throw error;
