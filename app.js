@@ -1,6 +1,6 @@
 // Entrada do CRM: login, escolha da empresa, menu e rotas
 import { PRODUTO } from "./config.js";
-import { sb, estado, h, campo, opcoes, toast, falha, q, traduzirErro, souGeral, gerencio, souDono } from "./lib.js";
+import { sb, estado, h, campo, opcoes, toast, falha, q, traduzirErro, souGeral, gerencio, souDono, janela } from "./lib.js";
 import { telaPainel, telaFunil, telaLeads, telaConversas, telaTarefas, telaRelatorios } from "./telas.js";
 import { telaEquipe } from "./equipe.js";
 import { telaAjustes } from "./ajustes.js";
@@ -102,6 +102,24 @@ function telaCriarEmpresa() {
     h("p", { class: "pequeno" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); sb.auth.signOut(); } }, "Sair")))));
 }
 
+function novaEmpresa() {
+  const nomeEmpresa = h("input", { required: true, placeholder: "Ex.: Incorporadora X" });
+  const seuNome = h("input", { required: true, value: estado.eu?.nome ?? estado.usuario.user_metadata?.nome ?? "" });
+  const fechar = janela("Nova empresa", h("form", { onsubmit: async (e) => {
+    e.preventDefault();
+    try {
+      const id = await q(sb.rpc("criar_imobiliaria", { p_nome: nomeEmpresa.value.trim(), p_seu_nome: seuNome.value.trim(), p_telefone: null }));
+      localStorage.setItem("vle:empresa", id);
+      fechar();
+      toast("Empresa criada. Você é o dono dela.");
+      iniciar();
+    } catch (err) { falha(err); }
+  } },
+  h("p", { class: "suave pequeno" }, "A empresa nova começa vazia, com o funil padrão. Você será o dono e pode trocar de empresa no seletor do topo."),
+  campo("Nome da empresa", nomeEmpresa), campo("Seu nome nela", seuNome),
+  h("button", { class: "btn primario", type: "submit" }, "Criar empresa")), { largura: 480 });
+}
+
 export async function carregarEmpresa() {
   const id = estado.empresaId;
   const [empresa, equipe, times, etapas, whats] = await Promise.all([
@@ -145,7 +163,8 @@ function casca() {
       opcoes([["sem", "Sem time"], ...estado.times.map((t) => [t.id, t.nome])], estado.filtroTime, "Todos os times"))
     : estado.eu?.time_id ? h("span", { class: "etiqueta time" }, "Time: " + (estado.times.find((t) => t.id === estado.eu.time_id)?.nome ?? "")) : null;
 
-  topo.append(h("button", { class: "btn botao-menu", onclick: () => menu.classList.toggle("aberto") }, "☰"), seletorEmpresa, seletorTime);
+  topo.append(h("button", { class: "btn botao-menu", onclick: () => menu.classList.toggle("aberto") }, "☰"), seletorEmpresa,
+    h("button", { class: "btn mini", title: "Criar outra empresa", onclick: novaEmpresa }, "+ Nova empresa"), seletorTime);
 
   if (telaAtual?.sair) telaAtual.sair();
   telaAtual = null;
