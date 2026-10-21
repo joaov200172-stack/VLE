@@ -8,6 +8,7 @@ export const sb = createClient(SUPABASE_URL, SUPABASE_CHAVE, {
 
 export const estado = {
   usuario: null,
+  admin: false,
   vinculos: [], // membros do usuário em cada empresa (com o nome da empresa)
   empresaId: null,
   eu: null, // meu registro em membros na empresa atual
@@ -20,6 +21,7 @@ export const estado = {
 };
 
 // ---------- permissões ----------
+export const souAdmin = () => estado.admin === true; // dono geral da plataforma: vê todas as empresas
 export const souDono = () => estado.eu?.papel === "dono";
 export const souGeral = () => souDono() || (estado.eu?.papel === "gerente" && !estado.eu?.time_id);
 export const souGerenteTime = () => estado.eu?.papel === "gerente" && !!estado.eu?.time_id;

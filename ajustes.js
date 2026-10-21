@@ -44,22 +44,7 @@ export async function telaAjustes(el) {
           souDono() ? h("button", { class: "btn mini perigo", onclick: async () => {
             if (!confirmar("Gerar um endereço novo? O antigo para de funcionar na hora (inclusive nos formulários e integrações).")) return;
             try { await q(sb.rpc("gerar_novo_token_captura", { p_imobiliaria_id: estado.empresaId })); redesenhar(); } catch (e) { falha(e); }
-          } }, "Gerar endereço novo") : null)) : null,
-      souDono() ? h("div", { class: "cartao" },
-        h("h3", {}, "Excluir empresa"),
-        h("p", { class: "suave pequeno" }, "Apaga a empresa com todos os leads, conversas, times, pessoas e configurações. Não dá para desfazer."),
-        h("button", { class: "btn perigo", onclick: async () => {
-          const digitado = window.prompt(`Para confirmar, digite o nome da empresa: ${estado.empresa.nome}`);
-          if (digitado === null) return;
-          if (digitado.trim().toLowerCase() !== estado.empresa.nome.trim().toLowerCase()) return toast("O nome digitado não confere.", true);
-          try {
-            const apagadas = await q(sb.from("imobiliarias").delete().eq("id", estado.empresaId).select("id"));
-            if (!apagadas.length) throw new Error("Não foi possível excluir a empresa.");
-            localStorage.removeItem("vle:empresa");
-            location.hash = "";
-            location.reload();
-          } catch (e) { falha(e); }
-        } }, "Excluir esta empresa")) : null);
+          } }, "Gerar endereço novo") : null)) : null);
   }
 
   // ----- funil -----

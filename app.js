@@ -1,13 +1,15 @@
 // Entrada do CRM: login, escolha da empresa, menu e rotas
 import { PRODUTO } from "./config.js";
-import { sb, estado, h, campo, opcoes, toast, falha, q, traduzirErro, souGeral, gerencio, souDono, janela } from "./lib.js";
+import { sb, estado, h, campo, opcoes, toast, falha, q, traduzirErro, souGeral, gerencio, souDono, souAdmin } from "./lib.js";
 import { telaPainel, telaFunil, telaLeads, telaConversas, telaTarefas, telaRelatorios } from "./telas.js";
 import { telaEquipe } from "./equipe.js";
 import { telaAjustes } from "./ajustes.js";
+import { telaPlataforma } from "./plataforma.js";
 
 const app = document.getElementById("app");
 
 const ROTAS = [
+  { id: "plataforma", nome: "Todas as empresas", tela: telaPlataforma, so: souAdmin },
   { id: "painel", nome: "Painel", tela: telaPainel },
   { id: "funil", nome: "Funil", tela: telaFunil },
   { id: "leads", nome: "Leads", tela: telaLeads },
@@ -83,41 +85,31 @@ function telaNovaSenha() {
 }
 
 // ---------------- empresa ----------------
-function telaCriarEmpresa() {
-  const nomeEmpresa = h("input", { required: true, placeholder: "Ex.: VLE Marketing" });
-  const seuNome = h("input", { required: true, value: estado.usuario.user_metadata?.nome ?? "" });
-  const tel = h("input", { placeholder: "(32) 99999-9999" });
+function telaSemAcesso() {
   app.replaceChildren(h("div", { class: "tela-login" }, h("div", { class: "caixa-login" },
-    h("div", { class: "marca" }, h("div", { class: "logo" }, "VLE"), h("strong", {}, "Criar sua empresa")),
-    h("p", { class: "suave pequeno" }, "Você será o dono e verá tudo. Depois crie os times e convide as pessoas. Se você foi convidado, peça para a empresa te convidar com este e-mail: ", h("strong", {}, estado.usuario.email)),
-    h("form", { onsubmit: async (e) => {
-      e.preventDefault();
-      try {
-        const id = await q(sb.rpc("criar_imobiliaria", { p_nome: nomeEmpresa.value.trim(), p_seu_nome: seuNome.value.trim(), p_telefone: tel.value.trim() || null }));
-        localStorage.setItem("vle:empresa", id);
-        iniciar();
-      } catch (err) { falha(err); }
-    } }, campo("Nome da empresa", nomeEmpresa), campo("Seu nome", seuNome), campo("Seu telefone", tel),
-      h("button", { class: "btn primario", type: "submit" }, "Criar empresa")),
-    h("p", { class: "pequeno" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); sb.auth.signOut(); } }, "Sair")))));
+    h("div", { class: "marca" }, h("div", { class: "logo" }, "VLE"), h("strong", {}, `${PRODUTO} CRM`)),
+    h("p", {}, "Sua conta ainda não está ligada a nenhuma empresa."),
+    h("p", { class: "suave pequeno" }, "Peça ao responsável pela sua empresa um convite para o e-mail ", h("strong", {}, estado.usuario.email), ". Depois de convidado, é só entrar de novo."),
+    h("p", { class: "pequeno" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); location.reload(); } }, "Já fui convidado"), " · ",
+      h("a", { href: "#", onclick: (e) => { e.preventDefault(); sb.auth.signOut(); } }, "Sair")))));
 }
 
-function novaEmpresa() {
-  const nomeEmpresa = h("input", { required: true, placeholder: "Ex.: Incorporadora X" });
-  const seuNome = h("input", { required: true, value: estado.eu?.nome ?? estado.usuario.user_metadata?.nome ?? "" });
-  const fechar = janela("Nova empresa", h("form", { onsubmit: async (e) => {
-    e.preventDefault();
-    try {
-      const id = await q(sb.rpc("criar_imobiliaria", { p_nome: nomeEmpresa.value.trim(), p_seu_nome: seuNome.value.trim(), p_telefone: null }));
-      localStorage.setItem("vle:empresa", id);
-      fechar();
-      toast("Empresa criada. Você é o dono dela.");
-      iniciar();
-    } catch (err) { falha(err); }
-  } },
-  h("p", { class: "suave pequeno" }, "A empresa nova começa vazia, com o funil padrão. Você será o dono e pode trocar de empresa no seletor do topo."),
-  campo("Nome da empresa", nomeEmpresa), campo("Seu nome nela", seuNome),
-  h("button", { class: "btn primario", type: "submit" }, "Criar empresa")), { largura: 480 });
+// Empresas que o usuário pode abrir. O dono geral da plataforma abre todas.
+export async function carregarVinculos() {
+  estado.admin = (await sb.rpc("sou_admin_plataforma")).data === true;
+  const meus = await q(sb.from("membros").select("imobiliaria_id, papel, time_id, nome, imobiliarias(nome)").eq("user_id", estado.usuario.id).eq("ativo", true));
+  if (!estado.admin) return (estado.vinculos = meus);
+  const todas = await q(sb.from("imobiliarias").select("id, nome").order("nome"));
+  estado.vinculos = todas.map((i) => meus.find((m) => m.imobiliaria_id === i.id) ?? { imobiliaria_id: i.id, papel: "dono", time_id: null, nome: null, imobiliarias: { nome: i.nome } });
+  return estado.vinculos;
+}
+
+export async function abrirEmpresa(id, rota = "painel") {
+  estado.empresaId = id;
+  localStorage.setItem("vle:empresa", id);
+  estado.filtroTime = "";
+  await carregarEmpresa();
+  if (location.hash === `#/${rota}`) casca(); else location.hash = `#/${rota}`;
 }
 
 export async function carregarEmpresa() {
@@ -131,6 +123,7 @@ export async function carregarEmpresa() {
   ]);
   Object.assign(estado, { empresa, equipe, times, etapas, whatsapp: whats.data === true });
   estado.eu = equipe.find((m) => m.user_id === estado.usuario.id) ?? estado.vinculos.find((v) => v.imobiliaria_id === id);
+  if (estado.admin) estado.eu = { ...(estado.eu ?? {}), papel: "dono", time_id: null, nome: estado.eu?.nome ?? "Dono geral" };
   if (!souGeral()) estado.filtroTime = "";
 }
 
@@ -163,8 +156,7 @@ function casca() {
       opcoes([["sem", "Sem time"], ...estado.times.map((t) => [t.id, t.nome])], estado.filtroTime, "Todos os times"))
     : estado.eu?.time_id ? h("span", { class: "etiqueta time" }, "Time: " + (estado.times.find((t) => t.id === estado.eu.time_id)?.nome ?? "")) : null;
 
-  topo.append(h("button", { class: "btn botao-menu", onclick: () => menu.classList.toggle("aberto") }, "☰"), seletorEmpresa,
-    h("button", { class: "btn mini", title: "Criar outra empresa", onclick: novaEmpresa }, "+ Nova empresa"), seletorTime);
+  topo.append(h("button", { class: "btn botao-menu", onclick: () => menu.classList.toggle("aberto") }, "☰"), seletorEmpresa, seletorTime);
 
   if (telaAtual?.sair) telaAtual.sair();
   telaAtual = null;
@@ -176,6 +168,7 @@ function casca() {
 function papelTexto() {
   const e = estado.eu;
   if (!e) return "";
+  if (souAdmin()) return "Dono geral · todas as empresas";
   if (e.papel === "dono") return "Dono · vê tudo";
   if (e.papel === "gerente" && !e.time_id) return "Gerente geral · vê tudo";
   const t = estado.times.find((x) => x.id === e.time_id)?.nome;
@@ -192,8 +185,8 @@ async function iniciar() {
     if (!session) return telaLogin();
     estado.usuario = session.user;
     await sb.rpc("aceitar_convites", { p_nome: session.user.user_metadata?.nome ?? null });
-    estado.vinculos = await q(sb.from("membros").select("imobiliaria_id, papel, time_id, nome, imobiliarias(nome)").eq("user_id", session.user.id).eq("ativo", true));
-    if (!estado.vinculos.length) return telaCriarEmpresa();
+    await carregarVinculos();
+    if (!estado.vinculos.length && !estado.admin) return telaSemAcesso();
     const salvo = localStorage.getItem("vle:empresa");
     estado.empresaId = estado.vinculos.some((v) => v.imobiliaria_id === salvo) ? salvo : estado.vinculos[0].imobiliaria_id;
     await carregarEmpresa();
