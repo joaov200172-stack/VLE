@@ -22,6 +22,12 @@ CRM da VLE para agências e incorporadoras. A empresa mãe cadastra **times**; c
 | `ajustes.js` | Empresa, etapas do funil, mensagens prontas, WhatsApp, formulários da Meta e robô |
 | `supabase/migrations` | SQL das mudanças no banco |
 
+## Leads automáticos dos anúncios
+
+- **Formulários da Meta (Facebook e Instagram):** em Configurações → Formulários da Meta o dono conecta uma ou várias páginas. Todo formulário de todo anúncio dessas páginas vira lead na hora (webhook `leadgen` na função `meta-leads`) e, a cada 15 minutos, o CRM confere na Meta se faltou algum (`pg_cron` → `meta-leads` com `acao: sincronizar`).
+- **WhatsApp:** cada número novo que escreve vira lead (função `whatsapp-meta` para o WhatsApp oficial em coexistência, ou `whatsapp-receber` para a Z-API). Quem veio de anúncio Clique para WhatsApp fica com origem `meta ads` e os dados do anúncio.
+- **Distribuição:** cada página, cada formulário e o número do WhatsApp podem mandar os leads para um time; sem time, entram no rodízio da empresa toda.
+
 ## Papéis
 
 - **Dono:** vê e configura tudo.

@@ -135,6 +135,9 @@ export async function telaAjustes(el) {
         h("label", { class: "linha pequeno", style: { margin: "10px 0" } }, h("input", { type: "checkbox", style: { width: "auto" }, checked: w.envio_automatico, onchange: async (e) => {
           try { await q(sb.from("integracoes_whatsapp").update({ envio_automatico: e.target.checked }).eq("imobiliaria_id", estado.empresaId)); toast("Salvo."); } catch (err) { falha(err); }
         } }), "Enviar sozinho as mensagens automáticas da fila (a cada 2 minutos)"),
+        seletorTime(w.time_id, async (time_id) => {
+          await q(sb.from("integracoes_whatsapp").update({ time_id }).eq("imobiliaria_id", estado.empresaId));
+        }, "Contatos novos no WhatsApp vão para"),
         w.provedor === "meta" ? h("div", { class: "linha" },
           h("button", { class: "btn", onclick: async () => {
             try { const r = await chamarFuncao("whatsapp-meta", { acao: "testar", imobiliaria_id: estado.empresaId }); toast(`Ligado: ${r.numero} (${r.nome ?? ""})${r.recebendo ? "" : " · atenção: não está recebendo mensagens"}`); } catch (e) { falha(e); }
@@ -212,22 +215,25 @@ export async function telaAjustes(el) {
   // ----- formulários da Meta -----
   async function abaMeta() {
     if (!souDono()) return h("div", { class: "cartao" }, h("p", {}, "Só o dono da empresa conecta as páginas da Meta."));
-    const paginas = await q(sb.from("integracoes_meta").select("page_id, page_nome, ativo, leads_recebidos, ultimo_lead_em, ultimo_erro").eq("imobiliaria_id", estado.empresaId));
+    const paginas = await q(sb.from("integracoes_meta").select("id, page_id, page_nome, ativo, leads_recebidos, ultimo_lead_em, ultimo_erro, time_id, times_formularios, sincronizado_em").eq("imobiliaria_id", estado.empresaId));
     let cfg = null;
     try { cfg = await chamarFuncao("meta-leads", { acao: "config", imobiliaria_id: estado.empresaId }); } catch (e) { cfg = { erro: e.message }; }
     const acao = (acaoNome, page_id, extra = {}) => chamarFuncao("meta-leads", { acao: acaoNome, imobiliaria_id: estado.empresaId, page_id, ...extra });
     const lista = paginas.map((p) => h("tr", {},
-      h("td", {}, h("strong", {}, p.page_nome ?? p.page_id), p.ultimo_erro ? h("div", { class: "erro-txt pequeno" }, p.ultimo_erro) : null),
+      h("td", {}, h("strong", {}, p.page_nome ?? p.page_id), p.ultimo_erro ? h("div", { class: "erro-txt pequeno" }, p.ultimo_erro) : null,
+        estado.times.length ? seletorTime(p.time_id, async (time_id) => { await q(sb.from("integracoes_meta").update({ time_id }).eq("id", p.id)); }) : null),
       h("td", {}, p.leads_recebidos), h("td", { class: "suave pequeno" }, dataHora(p.ultimo_lead_em)),
       h("td", { class: "linha" },
+        estado.times.length ? h("button", { class: "btn mini", onclick: () => timesPorFormulario(p).catch(falha) }, "Time por formulário") : null,
         h("button", { class: "btn mini", onclick: async () => { try { const r = await acao("testar", p.page_id); toast(`${r.pagina}: ${r.recebendo ? "recebendo leads" : "NÃO está recebendo"} · ${r.formularios} formulários`); } catch (e) { falha(e); } } }, "Testar"),
         h("button", { class: "btn mini", onclick: async () => { try { const r = await acao("importar", p.page_id, { dias: 7 }); toast(`${r.encontrados} leads encontrados, ${r.novos} novos.`); redesenhar(); } catch (e) { falha(e); } } }, "Buscar últimos 7 dias"),
         h("button", { class: "btn mini perigo", onclick: async () => { if (!confirmar("Desconectar esta página?")) return; try { await acao("desconectar", p.page_id); redesenhar(); } catch (e) { falha(e); } } }, "Desconectar"))));
     return h("div", { class: "cartao" },
       h("h3", {}, "Formulários instantâneos (Facebook e Instagram)"),
-      h("p", { class: "suave pequeno" }, "Cada formulário preenchido entra na hora como lead, com campanha, anúncio e formulário na ficha."),
+      h("p", { class: "suave pequeno" }, "Todos os formulários de todos os anúncios das páginas conectadas entram sozinhos como lead, com campanha, anúncio e formulário na ficha, e seguem o rodízio do time escolhido (ou da empresa toda). Além do aviso na hora, o CRM confere a cada 15 minutos se faltou algum."),
       paginas.length ? h("table", { class: "tabela" }, h("thead", {}, h("tr", {}, ["Página", "Leads", "Último lead", ""].map((c) => h("th", {}, c)))), h("tbody", {}, lista)) : h("p", { class: "suave" }, "Nenhuma página conectada."),
-      cfg?.pronto ? h("button", { class: "btn primario", style: { marginTop: "12px" }, onclick: () => conectarPagina(cfg).catch(falha) }, "Conectar página do Facebook")
+      paginas.some((p) => p.sincronizado_em) ? h("p", { class: "suave pequeno" }, "Última conferência automática: ", dataHora(paginas.map((p) => p.sincronizado_em).filter(Boolean).sort().pop())) : null,
+      cfg?.pronto ? h("button", { class: "btn primario", style: { marginTop: "12px" }, onclick: () => conectarPagina(cfg).catch(falha) }, "Conectar páginas do Facebook")
         : h("p", { class: "erro-txt pequeno" }, cfg?.erro ?? "O app da Meta ainda não está configurado."),
       h("p", { class: "suave pequeno" }, "Se o botão não abrir o Facebook, o endereço deste CRM precisa estar em \"Domínios do app\" nas configurações do app da Meta."));
   }
@@ -240,16 +246,59 @@ export async function telaAjustes(el) {
       if (!userToken) return toast("Conexão cancelada.", true);
       try {
         const { paginas } = await chamarFuncao("meta-leads", { acao: "paginas", imobiliaria_id: estado.empresaId, user_token: userToken });
-        const escolha = h("select", {}, opcoes(paginas.map((p) => [p.id, p.nome + (p.ligada === "aqui" ? " (já conectada)" : p.ligada === "outra" ? " (em outra empresa)" : "")])));
+        if (!paginas.length) return toast("Esta conta do Facebook não administra nenhuma página.", true);
+        const caixas = paginas.map((p) => ({ p, el: h("input", { type: "checkbox", style: { width: "auto" }, checked: p.ligada !== "outra", disabled: p.ligada === "outra" }) }));
         const raiz = document.getElementById("modal-raiz");
         const fundo = h("div", { class: "fundo-modal centro" }, h("div", { class: "janela" },
-          h("h2", {}, "Escolha a página"), campo("Página", escolha),
-          h("button", { class: "btn primario", onclick: async () => {
-            try { const r = await chamarFuncao("meta-leads", { acao: "conectar", imobiliaria_id: estado.empresaId, user_token: userToken, page_id: escolha.value }); fundo.remove(); toast(`Página ${r.pagina} conectada.`); redesenhar(); } catch (e) { falha(e); }
-          } }, "Conectar"), " ", h("button", { class: "btn", onclick: () => fundo.remove() }, "Cancelar")));
+          h("h2", {}, "Escolha as páginas"),
+          h("p", { class: "suave pequeno" }, "Os leads de todos os anúncios com formulário dessas páginas (Facebook e Instagram) vão entrar no CRM."),
+          ...caixas.map(({ p, el }) => h("label", { class: "linha", style: { margin: "6px 0" } }, el, p.nome,
+            p.ligada === "aqui" ? h("span", { class: "suave pequeno" }, "(já conectada)") : p.ligada === "outra" ? h("span", { class: "suave pequeno" }, "(em outra empresa)") : null)),
+          h("div", { class: "linha", style: { marginTop: "12px" } },
+            h("button", { class: "btn primario", onclick: async () => {
+              const page_ids = caixas.filter((c) => c.el.checked && !c.el.disabled).map((c) => c.p.id);
+              if (!page_ids.length) return toast("Marque ao menos uma página.", true);
+              try {
+                const r = await chamarFuncao("meta-leads", { acao: "conectar", imobiliaria_id: estado.empresaId, user_token: userToken, page_ids });
+                fundo.remove();
+                toast(`Conectadas: ${r.pagina}` + (r.falhas?.length ? ` · Não conectou: ${r.falhas.join(" · ")}` : ""), !!r.falhas?.length);
+                redesenhar();
+              } catch (e) { falha(e); }
+            } }, "Conectar"),
+            h("button", { class: "btn", onclick: () => fundo.remove() }, "Cancelar"))));
         raiz.append(fundo);
       } catch (e) { falha(e); }
     }, opcoesLogin);
+  }
+
+  // Escolha do time que recebe os leads (vazio = rodízio da empresa toda)
+  function seletorTime(atual, salvar, rotulo = "Leads vão para") {
+    if (!estado.times.length) return null;
+    const sel = h("select", { style: { width: "auto" }, onchange: async () => {
+      try { await salvar(sel.value || null); toast("Salvo."); } catch (e) { falha(e); }
+    } }, opcoes(estado.times.filter((t) => t.ativo || t.id === atual).map((t) => [t.id, "Time " + t.nome]), atual, "Rodízio da empresa toda"));
+    return h("label", { class: "linha pequeno", style: { margin: "6px 0" } }, rotulo + ":", sel);
+  }
+
+  async function timesPorFormulario(p) {
+    const { formularios } = await chamarFuncao("meta-leads", { acao: "formularios", imobiliaria_id: estado.empresaId, page_id: p.page_id });
+    const mapa = { ...(p.times_formularios ?? {}) };
+    const linhas = formularios.map((f) => {
+      const sel = h("select", { style: { width: "auto" }, onchange: () => { if (sel.value) mapa[f.id] = sel.value; else delete mapa[f.id]; } },
+        opcoes(estado.times.filter((t) => t.ativo || t.id === mapa[f.id]).map((t) => [t.id, "Time " + t.nome]), mapa[f.id], "Igual à página"));
+      return h("tr", {}, h("td", {}, f.nome, f.ativo ? null : h("span", { class: "suave pequeno" }, " (arquivado)")), h("td", {}, sel));
+    });
+    const raiz = document.getElementById("modal-raiz");
+    const fundo = h("div", { class: "fundo-modal centro" }, h("div", { class: "janela" },
+      h("h2", {}, "Time por formulário"),
+      h("p", { class: "suave pequeno" }, `Página ${p.page_nome ?? p.page_id}. Formulário sem time escolhido segue o time da página.`),
+      formularios.length ? h("table", { class: "tabela" }, h("tbody", {}, linhas)) : h("p", { class: "suave" }, "Nenhum formulário nesta página."),
+      h("div", { class: "linha", style: { marginTop: "12px" } },
+        h("button", { class: "btn primario", onclick: async () => {
+          try { await q(sb.from("integracoes_meta").update({ times_formularios: mapa }).eq("id", p.id)); fundo.remove(); toast("Salvo."); redesenhar(); } catch (e) { falha(e); }
+        } }, "Salvar"),
+        h("button", { class: "btn", onclick: () => fundo.remove() }, "Cancelar"))));
+    raiz.append(fundo);
   }
 
   // ----- robô -----
