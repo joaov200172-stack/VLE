@@ -123,10 +123,14 @@ export const CAMPOS_LEAD = "id,created_time,field_data,ad_id,ad_name,adset_name,
 // ---------------------------------------------------------------------
 // Processa um lead: busca na Meta, descobre o formulário e grava no CRM
 // ---------------------------------------------------------------------
-export type Integracao = { id: string; imobiliaria_id: string; page_id: string; page_token: string; ativo: boolean; formularios: Record<string, string> };
+export type Integracao = {
+  id: string; imobiliaria_id: string; page_id: string; page_token: string; ativo: boolean; formularios: Record<string, string>;
+  time_id?: string | null; times_formularios?: Record<string, string> | null;
+};
 export type Db = {
   integracaoPorPagina(pageId: string): Promise<Integracao | null>;
-  tokenCaptura(imobId: string): Promise<string>;
+  // token de captura do time (quando houver) ou da empresa
+  tokenCaptura(imobId: string, timeId: string | null): Promise<string>;
   capturar(params: ReturnType<typeof paraCaptura>): Promise<{ lead_id?: string; duplicado?: boolean; ignorado?: string }>;
   registrar(integracaoId: string, patch: { erro?: string | null; novo?: boolean; formularios?: Record<string, string> }): Promise<void>;
 };
@@ -144,8 +148,14 @@ export async function nomeFormulario(fetcher: Fetcher, integ: Integracao, formId
   }
 }
 
+// Time que recebe o lead: o escolhido para o formulário, senão o da página, senão nenhum (rodízio da empresa)
+export function timeDoLead(integ: Integracao, formId?: string | null): string | null {
+  const porForm = formId ? integ.times_formularios?.[formId] : null;
+  return porForm || integ.time_id || null;
+}
+
 export async function processarLead(db: Db, fetcher: Fetcher, integ: Integracao, lead: LeadMeta) {
-  const token = await db.tokenCaptura(integ.imobiliaria_id);
+  const token = await db.tokenCaptura(integ.imobiliaria_id, timeDoLead(integ, lead.form_id));
   const f = await nomeFormulario(fetcher, integ, lead.form_id);
   const r = await db.capturar(paraCaptura(lead, f.nome, token));
   const novo = !r.ignorado && !r.duplicado;
@@ -174,22 +184,32 @@ export async function processarWebhook(db: Db, fetcher: Fetcher, corpo: any) {
   return res;
 }
 
-// Busca os leads dos últimos N dias de todos os formulários da página (recupera o que não chegou pelo webhook)
-export async function importarRecentes(db: Db, fetcher: Fetcher, integ: Integracao, dias: number) {
-  const desde = Math.floor(Date.now() / 1000) - Math.max(1, Math.min(dias, 90)) * 86400;
-  const res = { formularios: 0, encontrados: 0, novos: 0, ja_existiam: 0 };
-  let url: string | null = null;
-  const forms: { id: string; name: string }[] = [];
+// Lista os formulários da página (todos os anúncios usam um deles)
+export async function formulariosDaPagina(fetcher: Fetcher, integ: Integracao) {
+  const forms: { id: string; name: string; status?: string }[] = [];
   let pagina = await graph(fetcher, "GET", `${integ.page_id}/leadgen_forms`, { fields: "id,name,status", limit: "100", access_token: integ.page_token });
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 10; i++) {
     forms.push(...(pagina.data ?? []));
-    url = pagina.paging?.next ?? null;
+    const url = pagina.paging?.next ?? null;
     if (!url) break;
     const r = await fetcher(url, { method: "GET" }); pagina = JSON.parse(await r.text());
   }
+  return forms;
+}
+
+// Busca os leads recentes de todos os formulários da página (recupera o que não chegou pelo webhook).
+// dias: janela em dias (botão "Buscar últimos 7 dias"); desde: segundos Unix (sincronização automática).
+// apenasAtivos: ignora formulários arquivados, que não recebem leads novos.
+export async function importarRecentes(db: Db, fetcher: Fetcher, integ: Integracao, opcoes: number | { dias?: number; desde?: number; apenasAtivos?: boolean }) {
+  const o = typeof opcoes === "number" ? { dias: opcoes } : opcoes;
+  const agora = Math.floor(Date.now() / 1000);
+  const desde = o.desde ? Math.max(o.desde, agora - 90 * 86400) : agora - Math.max(1, Math.min(o.dias ?? 7, 90)) * 86400;
+  const res = { formularios: 0, encontrados: 0, novos: 0, ja_existiam: 0 };
+  const todos = await formulariosDaPagina(fetcher, integ);
   const cache = { ...(integ.formularios ?? {}) };
-  for (const f of forms) cache[f.id] = f.name;
+  for (const f of todos) cache[f.id] = f.name;
   integ.formularios = cache;
+  const forms = o.apenasAtivos ? todos.filter((f) => !f.status || f.status === "ACTIVE") : todos;
   for (const f of forms) {
     res.formularios++;
     const filtro = JSON.stringify([{ field: "time_created", operator: "GREATER_THAN", value: desde }]);

@@ -4,10 +4,12 @@
 //   GET  .../functions/v1/meta-leads?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
 //   POST .../functions/v1/meta-leads  (cabeçalho X-Hub-Signature-256, assinado com o segredo do app)
 // Pelo app (dono logado ou dono geral da plataforma, JWT): POST { acao, imobiliaria_id, ... }
-//   config | paginas {user_token} | conectar {user_token, page_id} | desconectar {page_id}
-//   importar {page_id, dias} | testar {page_id}
+//   config | paginas {user_token} | conectar {user_token, page_id | page_ids[]} | desconectar {page_id}
+//   importar {page_id, dias} | testar {page_id} | formularios {page_id}
+// Sincronização automática (pg_cron, cabeçalho x-cron-secret): POST { acao: "sincronizar" }
+//   busca em todas as páginas ativas os leads que o webhook não entregou (rede de segurança)
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { assinaturaValida, Db, ErroMeta, graph, importarRecentes, Integracao, processarWebhook, VERSAO } from "./logica.ts";
+import { assinaturaValida, Db, ErroMeta, formulariosDaPagina, graph, importarRecentes, Integracao, processarWebhook, VERSAO } from "./logica.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -31,12 +33,17 @@ async function params() {
   return parametros!;
 }
 
+const CAMPOS_INTEG = "id, imobiliaria_id, page_id, page_token, ativo, formularios, time_id, times_formularios";
 const db: Db = {
   async integracaoPorPagina(pageId) {
-    const { data } = await admin.from("integracoes_meta").select("id, imobiliaria_id, page_id, page_token, ativo, formularios").eq("page_id", pageId).maybeSingle();
+    const { data } = await admin.from("integracoes_meta").select(CAMPOS_INTEG).eq("page_id", pageId).maybeSingle();
     return data as Integracao | null;
   },
-  async tokenCaptura(imobId) {
+  async tokenCaptura(imobId, timeId) {
+    if (timeId) {
+      const { data: t } = await admin.from("times").select("token_captura").eq("id", timeId).eq("imobiliaria_id", imobId).eq("ativo", true).maybeSingle();
+      if (t?.token_captura) return t.token_captura;
+    }
     const { data } = await admin.from("imobiliarias").select("token_captura").eq("id", imobId).single();
     return data!.token_captura;
   },
@@ -85,6 +92,31 @@ async function garantirAssinaturaDoApp() {
   });
 }
 
+// Rede de segurança: a cada 15 min busca os leads novos de todas as páginas ativas.
+// Pega o que o webhook não entregou (app ainda em modo de desenvolvimento, falha de rede, página reconectada).
+async function sincronizarTudo() {
+  const { data: integs } = await admin.from("integracoes_meta").select(CAMPOS_INTEG + ", sincronizado_em").eq("ativo", true);
+  const res = { paginas: 0, encontrados: 0, novos: 0, erros: [] as string[] };
+  const agora = Math.floor(Date.now() / 1000);
+  for (const integ of (integs ?? []) as (Integracao & { sincronizado_em: string | null })[]) {
+    res.paginas++;
+    const ultima = integ.sincronizado_em ? Math.floor(new Date(integ.sincronizado_em).getTime() / 1000) : agora - 86400;
+    const inicio = new Date().toISOString();
+    try {
+      // 2 h de folga: a Meta às vezes publica o lead com atraso; repetidos são ignorados pelo ref_externa
+      const r = await importarRecentes(db, fetch, integ, { desde: Math.max(ultima - 7200, agora - 3 * 86400), apenasAtivos: true });
+      res.encontrados += r.encontrados; res.novos += r.novos;
+      await admin.from("integracoes_meta").update({ sincronizado_em: inicio }).eq("id", integ.id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.erros.push(msg);
+      await db.registrar(integ.id, { erro: msg });
+    }
+  }
+  if (res.erros.length) console.error("meta-leads sincronizar", res.erros);
+  return { ok: true, ...res };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const url = new URL(req.url);
@@ -98,6 +130,14 @@ Deno.serve(async (req) => {
     return new Response("forbidden", { status: 403 });
   }
   if (req.method !== "POST") return json({ erro: "Use POST" }, 405);
+
+  // ---- sincronização automática (pg_cron) ----
+  const segredoCron = req.headers.get("x-cron-secret");
+  if (segredoCron) {
+    const { data: ok } = await admin.rpc("validar_segredo_cron", { p_segredo: segredoCron });
+    if (ok !== true) return json({ erro: "segredo inválido" }, 401);
+    return json(await sincronizarTudo());
+  }
 
   // ---- evento da Meta ----
   const assinatura = req.headers.get("x-hub-signature-256");
@@ -142,17 +182,39 @@ Deno.serve(async (req) => {
       }
 
       case "conectar": {
-        const pageId = String(corpo.page_id ?? "");
-        const pagina = (await paginasDoUsuario(String(corpo.user_token ?? ""))).find((x) => x.id === pageId);
-        if (!pagina) return json({ erro: "Página não encontrada nesta conta do Facebook" }, 404);
-        const { data: existente } = await admin.from("integracoes_meta").select("imobiliaria_id").eq("page_id", pageId).maybeSingle();
-        if (existente && existente.imobiliaria_id !== imobId) return json({ erro: "Esta página já está ligada a outra imobiliária" }, 409);
+        // Uma ou várias páginas de uma vez: os formulários de todos os anúncios dessas páginas passam a entrar sozinhos
+        const ids = [...new Set((Array.isArray(corpo.page_ids) ? corpo.page_ids : [corpo.page_id]).map((x: unknown) => String(x ?? "")).filter(Boolean))];
+        if (!ids.length) return json({ erro: "Escolha ao menos uma página" }, 400);
+        const todas = await paginasDoUsuario(String(corpo.user_token ?? ""));
         await garantirAssinaturaDoApp();
-        await graph(fetch, "POST", `${pageId}/subscribed_apps`, { subscribed_fields: "leadgen", access_token: pagina.access_token });
-        const reg = { imobiliaria_id: imobId, page_id: pageId, page_nome: pagina.name, page_token: pagina.access_token, conectado_por: u.user.id, ativo: true, ultimo_erro: null, updated_at: new Date().toISOString() };
-        const { error } = await admin.from("integracoes_meta").upsert(reg, { onConflict: "page_id" });
-        if (error) throw new Error(error.message);
-        return json({ ok: true, pagina: pagina.name });
+        const conectadas: string[] = [], falhas: string[] = [];
+        for (const pageId of ids) {
+          const pagina = todas.find((x) => x.id === pageId);
+          if (!pagina) { falhas.push(`${pageId}: não encontrada nesta conta do Facebook`); continue; }
+          try {
+            const { data: existente } = await admin.from("integracoes_meta").select("imobiliaria_id").eq("page_id", pageId).maybeSingle();
+            if (existente && existente.imobiliaria_id !== imobId) throw new Error("já está ligada a outra empresa");
+            await graph(fetch, "POST", `${pageId}/subscribed_apps`, { subscribed_fields: "leadgen", access_token: pagina.access_token });
+            const reg = { imobiliaria_id: imobId, page_id: pageId, page_nome: pagina.name, page_token: pagina.access_token, conectado_por: u.user.id, ativo: true, ultimo_erro: null, updated_at: new Date().toISOString() };
+            const { error } = await admin.from("integracoes_meta").upsert(reg, { onConflict: "page_id" });
+            if (error) throw new Error(error.message);
+            conectadas.push(pagina.name);
+          } catch (e) {
+            falhas.push(`${pagina.name}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        if (!conectadas.length) return json({ erro: falhas.join(" · ") || "Nenhuma página conectada" }, 400);
+        return json({ ok: true, pagina: conectadas.join(", "), conectadas, falhas });
+      }
+
+      case "formularios": {
+        const { data: integ } = await admin.from("integracoes_meta").select(CAMPOS_INTEG).eq("imobiliaria_id", imobId).eq("page_id", String(corpo.page_id)).maybeSingle();
+        if (!integ) return json({ erro: "Página não conectada" }, 404);
+        const forms = await formulariosDaPagina(fetch, integ as Integracao);
+        const cache = { ...((integ as Integracao).formularios ?? {}) };
+        for (const f of forms) cache[f.id] = f.name;
+        await db.registrar(integ.id, { erro: null, formularios: cache });
+        return json({ ok: true, formularios: forms.map((f) => ({ id: f.id, nome: f.name, ativo: !f.status || f.status === "ACTIVE" })) });
       }
 
       case "desconectar": {
@@ -165,7 +227,7 @@ Deno.serve(async (req) => {
 
       case "importar":
       case "testar": {
-        const { data: integ } = await admin.from("integracoes_meta").select("id, imobiliaria_id, page_id, page_token, ativo, formularios").eq("imobiliaria_id", imobId).eq("page_id", String(corpo.page_id)).maybeSingle();
+        const { data: integ } = await admin.from("integracoes_meta").select(CAMPOS_INTEG).eq("imobiliaria_id", imobId).eq("page_id", String(corpo.page_id)).maybeSingle();
         if (!integ) return json({ erro: "Página não conectada" }, 404);
         if (corpo.acao === "testar") {
           const pag = await graph(fetch, "GET", integ.page_id, { fields: "name", access_token: integ.page_token });
